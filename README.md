@@ -92,7 +92,7 @@ import inv "github.com/72nd/swiss-qr-invoice"
 
 invoice := inv.Invoice{
 	ReceiverIBAN:    "CH44 3199 9123 0008 8901 2",
-	IsQrIBAN:        true,
+	ReferenceType:   inv.ReferenceTypeQRR, // QRR (QR-IBAN), SCOR or NON (normal IBAN)
 	ReceiverName:    "Robert Schneider AG",
 	ReceiverStreet:  "Rue du Lac",
 	ReceiverNumber:  "12",

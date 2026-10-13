@@ -17,7 +17,7 @@ import (
 // Invoice contains all necessary information for the generation of an invoice.
 type Invoice struct {
 	ReceiverIBAN    string `yaml:"receiver_iban" default:"CH44 3199 9123 0008 8901 2"`
-	IsQrIBAN        bool   `yaml:"is_qr_iban" default:"true"`
+	ReferenceType   string `yaml:"reference_type" default:"QRR"` // QRR (QR-IBAN), SCOR or NON (normal IBAN)
 	ReceiverName    string `yaml:"receiver_name" default:"Robert Schneider AG"`
 	ReceiverStreet  string `yaml:"receiver_street" default:"Rue du Lac"`
 	ReceiverNumber  string `yaml:"receiver_number" default:"12"`
@@ -146,9 +146,9 @@ S\r
 {{ .inv.AdditionalInfo }}\r
 EPD
 `
-	refType := "QRR"
-	if !i.IsQrIBAN {
-		refType = "SCOR"
+	reference := strings.Replace(i.Reference, " ", "", -1)
+	if i.ReferenceType == ReferenceTypeNON {
+		reference = ""
 	}
 	payeeAdrType := "S"
 	if i.noPayee() {
@@ -159,8 +159,8 @@ EPD
 		"iban":         strings.Replace(i.ReceiverIBAN, " ", "", -1),
 		"amount":       strings.Replace(i.Amount, " ", "", -1),
 		"payeeAdrType": payeeAdrType,
-		"reference":    strings.Replace(i.Reference, " ", "", -1),
-		"refType":      refType,
+		"reference":    reference,
+		"refType":      i.ReferenceType,
 	}
 	tpl, err := template.New("qr-content").Parse(qrTpl)
 	if err != nil {

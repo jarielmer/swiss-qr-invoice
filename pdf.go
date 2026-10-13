@@ -16,6 +16,9 @@ const (
 )
 
 func getDoc(inv Invoice) (*wrapper.Doc, error) {
+	if err := inv.Validate(); err != nil {
+		return nil, err
+	}
 	doc, err := wrapper.NewDoc(12, 1)
 	if err != nil {
 		return nil, err
