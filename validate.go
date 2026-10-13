@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -15,10 +17,23 @@ const (
 	ReferenceTypeNON  = "NON"  // No reference, requires a normal IBAN
 )
 
-const maxNameLength = 70
+// Field length limits (Swiss Implementation Guidelines QR-bill v2.3, 4.2.2).
+const (
+	maxNameLength           = 70
+	maxStreetLength         = 70
+	maxBuildingNumberLength = 16
+	maxPostalCodeLength     = 16
+	maxTownLength           = 35
+	maxAdditionalInfoLength = 140
+)
 
-// Validate checks the invoice for combinations the QR bill standard does not
-// allow. It is called before rendering.
+var (
+	reCountry = regexp.MustCompile(`^[A-Z]{2}$`)
+	reAmount  = regexp.MustCompile(`^\d{1,9}\.\d{2}$`)
+)
+
+// Validate checks the invoice for combinations and values the QR bill standard
+// does not allow. It is called before rendering.
 func (i Invoice) Validate() error {
 	iban := normalize(i.ReceiverIBAN)
 	if !validIBAN(iban) {
@@ -50,24 +65,76 @@ func (i Invoice) Validate() error {
 		return fmt.Errorf("unknown reference type %q", i.ReferenceType)
 	}
 
-	// Structured address (type S): name, postal code, town and country are mandatory.
-	if strings.TrimSpace(i.ReceiverName) == "" {
-		return errors.New("creditor name is required")
+	// Creditor: structured address (type S) is mandatory.
+	if err := validateAddress("creditor", i.ReceiverName, i.ReceiverStreet, i.ReceiverNumber, i.ReceiverZIPCode, i.ReceiverPlace, i.ReceiverCountry); err != nil {
+		return err
 	}
-	if strings.TrimSpace(i.ReceiverZIPCode) == "" {
-		return errors.New("creditor postal code is required")
+	// Debtor: either completely empty or a complete structured address.
+	if !i.noDebtorData() {
+		if err := validateAddress("debtor", i.PayeeName, i.PayeeStreet, i.PayeeNumber, i.PayeeZIPCode, i.PayeePlace, i.PayeeCountry); err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(i.ReceiverPlace) == "" {
-		return errors.New("creditor town is required")
+
+	if utf8.RuneCountInString(i.AdditionalInfo) > maxAdditionalInfoLength {
+		return fmt.Errorf("additional information exceeds %d characters", maxAdditionalInfoLength)
 	}
-	if strings.TrimSpace(i.ReceiverCountry) == "" {
-		return errors.New("creditor country is required")
+	if i.Currency != "CHF" && i.Currency != "EUR" {
+		return fmt.Errorf("invalid currency %q (CHF or EUR)", i.Currency)
 	}
-	if utf8.RuneCountInString(i.ReceiverName) > maxNameLength {
-		return fmt.Errorf("creditor name exceeds %d characters", maxNameLength)
+	return validateAmount(i.Amount)
+}
+
+// noDebtorData reports whether no debtor field at all is set.
+func (i Invoice) noDebtorData() bool {
+	return i.PayeeName == "" && i.PayeeStreet == "" && i.PayeeNumber == "" &&
+		i.PayeeZIPCode == "" && i.PayeePlace == "" && i.PayeeCountry == ""
+}
+
+func validateAddress(party, name, street, number, postalCode, town, country string) error {
+	required := []struct{ label, value string }{
+		{"name", name}, {"postal code", postalCode}, {"town", town}, {"country", country},
 	}
-	if utf8.RuneCountInString(i.PayeeName) > maxNameLength {
-		return fmt.Errorf("debtor name exceeds %d characters", maxNameLength)
+	for _, f := range required {
+		if strings.TrimSpace(f.value) == "" {
+			return fmt.Errorf("%s %s is required", party, f.label)
+		}
+	}
+	limits := []struct {
+		label string
+		value string
+		max   int
+	}{
+		{"name", name, maxNameLength},
+		{"street", street, maxStreetLength},
+		{"building number", number, maxBuildingNumberLength},
+		{"postal code", postalCode, maxPostalCodeLength},
+		{"town", town, maxTownLength},
+	}
+	for _, f := range limits {
+		if utf8.RuneCountInString(f.value) > f.max {
+			return fmt.Errorf("%s %s exceeds %d characters", party, f.label, f.max)
+		}
+	}
+	if !reCountry.MatchString(country) {
+		return fmt.Errorf("%s country %q must be a two-letter ISO code", party, country)
+	}
+	return nil
+}
+
+// validateAmount accepts an empty amount (to be filled in by the payer) or a
+// positive amount with exactly two decimals up to 999999999.99. Spaces used as
+// thousands separators are ignored.
+func validateAmount(amount string) error {
+	a := strings.ReplaceAll(amount, " ", "")
+	if a == "" {
+		return nil
+	}
+	if !reAmount.MatchString(a) {
+		return fmt.Errorf("invalid amount %q", amount)
+	}
+	if strings.Trim(strings.ReplaceAll(a, ".", ""), "0") == "" {
+		return fmt.Errorf("invalid amount %q: must be greater than 0", amount)
 	}
 	return nil
 }
@@ -76,9 +143,25 @@ func normalize(s string) string {
 	return strings.ToUpper(strings.ReplaceAll(s, " ", ""))
 }
 
-// validIBAN checks a CH/LI IBAN (21 characters) with the ISO 13616 mod 97 checksum.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// validIBAN checks a CH/LI IBAN (21 characters): numeric check digits, numeric
+// 5 digit institution ID and the ISO 13616 mod 97 checksum.
 func validIBAN(iban string) bool {
 	if len(iban) != 21 || (!strings.HasPrefix(iban, "CH") && !strings.HasPrefix(iban, "LI")) {
+		return false
+	}
+	if !isDigits(iban[2:4]) || !isDigits(iban[4:9]) {
 		return false
 	}
 	return mod97(iban[4:]+iban[:4]) == 1
@@ -86,11 +169,11 @@ func validIBAN(iban string) bool {
 
 // isQRIBAN reports whether the institution ID (positions 5-9) is in the QR-IID range 30000-31999.
 func isQRIBAN(iban string) bool {
-	if len(iban) < 9 {
+	if len(iban) < 9 || !isDigits(iban[4:9]) {
 		return false
 	}
-	iid := iban[4:9]
-	return iid >= "30000" && iid <= "31999"
+	iid, err := strconv.Atoi(iban[4:9])
+	return err == nil && iid >= 30000 && iid <= 31999
 }
 
 // mod97 converts letters to numbers (A=10 ... Z=35) and returns the value mod 97.
@@ -116,24 +199,21 @@ func mod97(s string) int {
 
 // validQRReference checks length (27 digits) and the recursive mod 10 check digit.
 func validQRReference(ref string) bool {
-	if len(ref) != 27 {
+	if len(ref) != 27 || !isDigits(ref) {
 		return false
 	}
 	table := [10]int{0, 9, 4, 6, 8, 2, 7, 1, 3, 5}
 	carry := 0
 	for _, r := range ref[:26] {
-		if r < '0' || r > '9' {
-			return false
-		}
 		carry = table[(carry+int(r-'0'))%10]
 	}
-	check := ref[26]
-	return check >= '0' && check <= '9' && (10-carry)%10 == int(check-'0')
+	return (10-carry)%10 == int(ref[26]-'0')
 }
 
-// validCreditorReference checks an ISO 11649 reference (RF + 2 check digits + up to 21 chars).
+// validCreditorReference checks an ISO 11649 reference (RF + 2 numeric check
+// digits + 1 to 21 alphanumeric characters, mod 97 == 1).
 func validCreditorReference(ref string) bool {
-	if len(ref) < 5 || len(ref) > 25 || !strings.HasPrefix(ref, "RF") {
+	if len(ref) < 5 || len(ref) > 25 || !strings.HasPrefix(ref, "RF") || !isDigits(ref[2:4]) {
 		return false
 	}
 	return mod97(ref[4:]+ref[:4]) == 1
